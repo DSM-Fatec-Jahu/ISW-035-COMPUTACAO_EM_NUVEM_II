@@ -125,7 +125,7 @@ flowchart TD
     I["8️⃣ Executar migrações Prisma\nnpx prisma migrate deploy"]
     I --> J
 
-    J{Backend OK?\nGET /api/tasks → [ ]}
+    J{Backend OK?\nGET /api/tasks → vazio}
     J -- Não --> K["🔍 Verificar Log Stream\nno portal Azure"]
     K --> F
     J -- Sim --> L
