@@ -2,7 +2,7 @@
 
 ## 1. Descrição da Funcionalidade e Motivo do Uso
 
-Neste laboratório, desenvolveremos uma Cloud Function responsável por receber as notas de um aluno, calcular a média, gerar um boletim em formato PDF e salvá-lo no Google Cloud Storage (GCS). A função retornará um link público para o download do documento.
+Neste laboratório, desenvolveremos uma Cloud Function responsável por receber as notas de um aluno, calcular a média, gerar um boletim em formato PDF e salvá-lo no Google Cloud Storage (GCS). A função retornará um link temporário e seguro (URL assinada) para o download do documento.
 
 **Por que usar Cloud Functions (Serverless) para isso?**
 
@@ -37,7 +37,8 @@ gcloud services enable \
   run.googleapis.com \
   storage.googleapis.com \
   artifactregistry.googleapis.com \
-  logging.googleapis.com
+  logging.googleapis.com \
+  iamcredentials.googleapis.com
 ```
 
 > **Entendendo cada API:**
@@ -48,6 +49,7 @@ gcloud services enable \
 > * `storage.googleapis.com` (**Cloud Storage API**): permite criar buckets e armazenar os arquivos PDF.
 > * `artifactregistry.googleapis.com` (**Artifact Registry API**): armazena a imagem de contêiner gerada no build da função de 2ª geração.
 > * `logging.googleapis.com` (**Cloud Logging API**): registra os logs de execução da função, úteis para depurar erros.
+> * `iamcredentials.googleapis.com` (**IAM Service Account Credentials API**): necessária para que a função gere as URLs assinadas (Signed URLs) de download dos boletins.
 
 > **Observação:** a habilitação das APIs pode levar alguns instantes para se propagar. Ao executar o primeiro deploy, o `gcloud` ainda pode perguntar se deseja habilitar alguma API pendente; basta confirmar com `Y`. Habilitar tudo explicitamente desde o início, como neste passo, evita falhas no meio do laboratório.
 
@@ -57,15 +59,16 @@ gcloud services enable \
 
 Antes de programar a função, precisamos do "depósito" onde os PDFs serão armazenados. Você pode criar o bucket de duas formas: pelo painel gráfico (Opção A) ou diretamente pelo terminal (Opção B). Escolha a que preferir.
 
+> **Sobre o acesso aos arquivos:** este laboratório **não torna o bucket público**. Em contas vinculadas a uma organização (como contas institucionais), uma política de segurança chamada **Domain Restricted Sharing** costuma bloquear a concessão de acesso ao principal `allUsers`, resultando no erro `HTTPError 412: One or more users named in the policy do not belong to a permitted customer`. Para funcionar em qualquer cenário (conta pessoal ou organizacional) e ainda seguir uma prática mais segura, o bucket permanece **privado** e a função gera **URLs assinadas (Signed URLs)**, links temporários que concedem acesso por tempo limitado sem expor o bucket. Esse mecanismo está detalhado na Seção 5.
+
 ### Opção A: Criação via Painel Gráfico (Console)
 
 1. No painel do GCP, acesse o menu de navegação e procure por **Cloud Storage** e depois **Buckets**.
 2. Clique em **Criar (Create)**.
 3. Defina um nome único globalmente para o bucket. Neste roteiro usaremos `boletins-fatec-jahu` (caso o nome já esteja em uso, escolha outro e anote, pois ele será usado no código).
 4. Em **Local do tipo (Location type)**, escolha **Region** e selecione `us-central1`. Essa região costuma ter o menor custo e disponibilidade de recursos gratuitos (free tier).
-5. Mantenha as demais opções padrão e finalize a criação.
-6. Após criar o bucket, vá até a aba **Permissões (Permissions)**, clique em **Conceder acesso (Grant access)**, adicione o principal `allUsers` e atribua o papel **Leitor de objetos do Storage (Storage Object Viewer)**. Confirme o aviso de que o bucket se tornará público.
-7. Ainda no bucket, acesse a aba **Ciclo de vida (Lifecycle)**, clique em **Adicionar uma regra (Add a rule)**, escolha a ação **Excluir objeto (Delete object)** e defina a condição **Idade (Age)** com o valor `7` dias. Salve a regra.
+5. Mantenha as demais opções padrão, **sem alterar as configurações de acesso público**, e finalize a criação.
+6. Ainda no bucket, acesse a aba **Ciclo de vida (Lifecycle)**, clique em **Adicionar uma regra (Add a rule)**, escolha a ação **Excluir objeto (Delete object)** e defina a condição **Idade (Age)** com o valor `7` dias. Salve a regra.
 
 ### Opção B: Criação via Terminal (Cloud Shell)
 
@@ -77,15 +80,7 @@ No terminal do Cloud Shell, execute os comandos abaixo. Lembre-se de trocar `bol
    gcloud storage buckets create gs://boletins-fatec-jahu --location=us-central1
    ```
 
-2. Libere a leitura pública dos arquivos, concedendo o papel de leitor de objetos ao principal `allUsers`:
-
-   ```bash
-   gcloud storage buckets add-iam-policy-binding gs://boletins-fatec-jahu \
-     --member=allUsers \
-     --role=roles/storage.objectViewer
-   ```
-
-3. Crie um arquivo de configuração do ciclo de vida e aplique-o ao bucket. O comando abaixo gera um arquivo `lifecycle.json` definindo a exclusão automática de objetos com mais de 7 dias:
+2. Crie um arquivo de configuração do ciclo de vida e aplique-o ao bucket. O comando abaixo gera um arquivo `lifecycle.json` definindo a exclusão automática de objetos com mais de 7 dias:
 
    ```bash
    cat > lifecycle.json << 'EOF'
@@ -109,12 +104,11 @@ No terminal do Cloud Shell, execute os comandos abaixo. Lembre-se de trocar `bol
 > **Entendendo os comandos:**
 >
 > * `gcloud storage buckets create`: cria o bucket. O prefixo `gs://` identifica o protocolo do Cloud Storage e `--location` define a região física.
-> * `gcloud storage buckets add-iam-policy-binding`: adiciona uma regra de permissão (IAM) ao bucket. O membro `allUsers` representa qualquer pessoa na internet, e o papel `roles/storage.objectViewer` concede apenas leitura dos objetos, sem permitir alteração ou exclusão.
 > * `gcloud storage buckets update --lifecycle-file`: aplica regras de ciclo de vida ao bucket. A regra definida exclui automaticamente qualquer objeto que atinja a idade (`age`) de 7 dias, evitando o acúmulo de boletins antigos e o consumo desnecessário de armazenamento.
 
-> **Como o ciclo de vida interage com a sobrescrita:** cada novo boletim gerado para o mesmo aluno e matéria substitui o arquivo anterior e reinicia a contagem de idade do objeto (a "idade" passa a contar a partir da última gravação). Na prática, isso significa que a regra de 7 dias raramente apagará um boletim atualizado com frequência, e atuará principalmente como faxina automática de boletins de alunos cujas notas não foram lançadas novamente naquele período.
+> **Por que não há comando para liberar acesso público?** Em versões anteriores deste roteiro, o bucket era tornado público com `add-iam-policy-binding` concedendo o papel `roles/storage.objectViewer` ao principal `allUsers`. Esse comando falha em contas organizacionais por causa da política **Domain Restricted Sharing**, retornando o erro `HTTPError 412`. Por isso o bucket permanece privado, e o acesso aos PDFs é feito por URLs assinadas geradas pela função (ver Seção 5).
 
-> **Observação importante sobre o acesso público:** por padrão, buckets novos vêm com o **Acesso uniforme em nível de bucket (Uniform Bucket-Level Access)** ativado e bloqueio de acesso público. Como nosso laboratório retorna um link direto de download, precisamos liberar a leitura pública (passo executado tanto na Opção A quanto na Opção B). Em ambiente real de produção isso não seria recomendado; aqui é aceitável por se tratar de um laboratório controlado.
+> **Como o ciclo de vida interage com a sobrescrita:** cada novo boletim gerado para o mesmo aluno e matéria substitui o arquivo anterior e reinicia a contagem de idade do objeto (a "idade" passa a contar a partir da última gravação). Na prática, isso significa que a regra de 7 dias raramente apagará um boletim atualizado com frequência, e atuará principalmente como faxina automática de boletins de alunos cujas notas não foram lançadas novamente naquele período.
 
 ---
 
@@ -226,13 +220,27 @@ functions.http('gerarBoletim', (req, res) => {
     doc.end(); // Finaliza a criação do PDF
 
     // 7. Tratamento de Sucesso ou Erro ao salvar o arquivo
-    writeStream.on('finish', () => {
-        // Gera a URL pública padrão do Google Cloud Storage
-        const publicUrl = `https://storage.googleapis.com/${bucketName}/${fileName}`;
-        res.status(200).json({
-            mensagem: 'Boletim gerado e salvo com sucesso!',
-            link_download: publicUrl
-        });
+    writeStream.on('finish', async () => {
+        try {
+            // Gera uma URL assinada (Signed URL) com validade temporária.
+            // O bucket permanece PRIVADO; este link concede acesso por tempo limitado.
+            // 7 dias é o prazo máximo permitido para URLs assinadas v4.
+            const seteDiasEmMs = 7 * 24 * 60 * 60 * 1000;
+            const [signedUrl] = await file.getSignedUrl({
+                version: 'v4',
+                action: 'read',
+                expires: Date.now() + seteDiasEmMs // Válido por 7 dias
+            });
+
+            res.status(200).json({
+                mensagem: 'Boletim gerado e salvo com sucesso!',
+                link_download: signedUrl,
+                validade: '7 dias'
+            });
+        } catch (err) {
+            console.error('Erro ao gerar URL assinada:', err);
+            res.status(500).json({ erro: 'Arquivo salvo, mas falhou ao gerar o link de download.' });
+        }
     });
 
     writeStream.on('error', (err) => {
@@ -242,7 +250,9 @@ functions.http('gerarBoletim', (req, res) => {
 });
 ```
 
-> **Nota sobre a URL pública:** o link no formato `https://storage.googleapis.com/bucket/arquivo` só funciona porque liberamos o bucket para leitura pública no item 4. Caso prefira tornar público apenas o objeto gerado (em vez do bucket inteiro), você pode adicionar `predefinedAcl: 'publicRead'` nas opções do `createWriteStream`, desde que o bucket esteja com o Acesso uniforme em nível de bucket desativado.
+> **Nota sobre a URL assinada (Signed URL):** o método `getSignedUrl` gera um link criptograficamente assinado que funciona como uma "chave de acesso" embutida na própria URL. Quem tiver o link consegue baixar o arquivo diretamente pelo navegador, sem precisar fazer login em uma conta Google. Aqui o link vale por 7 dias (`expires`), que é o prazo máximo permitido para URLs assinadas v4. Após esse prazo, o link para de funcionar e é necessário gerar o boletim novamente. Essa abordagem é mais segura que um bucket público e funciona em qualquer tipo de conta, inclusive em contas educacionais com a política Domain Restricted Sharing ativa.
+
+> **Permissões necessárias para a conta de serviço:** a conta de serviço que executa a função precisa de dois papéis. O papel **Administrador de objetos do Storage (`roles/storage.objectAdmin`)** permite gravar e ler os PDFs no bucket. O papel **Criador de tokens de conta de serviço (`roles/iam.serviceAccountTokenCreator`)** permite gerar as URLs assinadas. Sem o primeiro, a função falha ao salvar o arquivo (`storage.objects.create access denied`); sem o segundo, salva o arquivo mas falha ao gerar o link. Os comandos para conceder ambos estão descritos na Seção 6, logo após o deploy.
 
 ---
 
@@ -258,7 +268,7 @@ gcloud functions deploy boletim-node \
   --source=. \
   --entry-point=gerarBoletim \
   --trigger-http \
-  --allow-unauthenticated
+  --no-allow-unauthenticated
 ```
 
 ### Entendendo os parâmetros escolhidos
@@ -270,42 +280,112 @@ gcloud functions deploy boletim-node \
 * `--source=.`: indica que os arquivos necessários (`index.js` e `package.json`) estão na pasta atual.
 * `--entry-point=gerarBoletim`: diz ao Google qual método exportado no código deve ser executado quando a requisição chegar. Tem que ser o nome exato definido no `functions.http(...)`.
 * `--trigger-http`: define que a função será acionada por uma requisição web padrão (HTTP).
-* `--allow-unauthenticated`: torna a URL pública. Como é um laboratório focado na funcionalidade, pulamos a camada de tokens do IAM para facilitar os testes via APIs externas.
+* `--no-allow-unauthenticated`: a função será **privada**, exigindo autenticação para ser chamada. Em contas educacionais e organizacionais, a política de segurança da instituição **bloqueia** funções públicas (`--allow-unauthenticated`), portanto a função autenticada é a única opção viável nesse cenário. Os testes serão feitos enviando um token de identidade na requisição, conforme detalhado na Seção 7.
 
-Após cerca de 2 minutos, o terminal exibirá o status `OK` e fornecerá a URL pública da sua função (algo como `https://boletim-node-...-uc.a.run.app`). Copie essa URL.
+> **Por que a função é privada, mas o download do PDF não exige login?** São duas camadas distintas. A **chamada da função** (enviar as notas e disparar a geração do boletim) exige autenticação, pois a função é privada. Já o **download do PDF** usa a URL assinada, que carrega a própria chave de acesso na URL e funciona sem login Google. Em resumo: gerar o boletim exige token; baixar o boletim gerado, não.
+
+Após cerca de 2 minutos, o terminal exibirá o status `OK` e fornecerá a URL da sua função (algo como `https://boletim-node-...-uc.a.run.app`). Copie essa URL.
 
 > **Dica:** se o Cloud Shell solicitar autorização ou perguntar se deseja habilitar APIs durante o primeiro deploy, confirme com `Y`. O processo de build é gerenciado automaticamente pelo Cloud Build.
+
+### Concedendo as permissões da conta de serviço
+
+Após o deploy, a conta de serviço que executa a função precisa de dois papéis: um para **gravar e ler arquivos no bucket** e outro para **gerar as URLs assinadas**. Por padrão, funções de 2ª geração usam a conta de serviço padrão do Compute Engine, no formato `NUMERO_DO_PROJETO-compute@developer.gserviceaccount.com`.
+
+1. Descubra o número do seu projeto:
+
+   ```bash
+   gcloud projects describe $(gcloud config get-value project) --format="value(projectNumber)"
+   ```
+
+2. Conceda à conta de serviço acesso de escrita e leitura ao bucket, substituindo `NUMERO_DO_PROJETO` pelo valor obtido acima:
+
+   ```bash
+   gcloud storage buckets add-iam-policy-binding gs://boletins-fatec-jahu \
+     --member="serviceAccount:NUMERO_DO_PROJETO-compute@developer.gserviceaccount.com" \
+     --role="roles/storage.objectAdmin"
+   ```
+
+3. Conceda à conta de serviço a permissão de assinar tokens, necessária para gerar as URLs assinadas:
+
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding \
+     NUMERO_DO_PROJETO-compute@developer.gserviceaccount.com \
+     --member="serviceAccount:NUMERO_DO_PROJETO-compute@developer.gserviceaccount.com" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   ```
+
+> **Entendendo as permissões:**
+>
+> * `roles/storage.objectAdmin`: concede à conta de serviço o direito de criar, ler e sobrescrever objetos no bucket. Sem ele, a função retorna o erro `storage.objects.create access denied` ao tentar salvar o PDF.
+> * `roles/iam.serviceAccountTokenCreator`: autoriza a conta de serviço a assinar tokens em nome de si mesma, requisito para o método `getSignedUrl` funcionar. Sem ele, a função salva o PDF, mas falha ao gerar o link de download.
+>
+> Observe que ambos os comandos usam o prefixo `serviceAccount:` no membro, e não `allUsers`. Como contas de serviço pertencem ao domínio do projeto, esses comandos funcionam normalmente mesmo em organizações com a política Domain Restricted Sharing ativa.
 
 ---
 
 ## 7. Testando a Função Implementada
 
+Como a função foi implantada de forma **privada** (`--no-allow-unauthenticated`), toda requisição precisa enviar um **token de identidade** no cabeçalho `Authorization`. Esse token comprova que quem está chamando a função é um usuário autenticado e autorizado.
+
+> **Importante:** o token de identidade tem validade de aproximadamente **1 hora**. Se a aula for longa, pode ser necessário gerar um novo token durante os testes. Isso não afeta o link de download do PDF, que continua válido por 7 dias.
+
+### Concedendo permissão de invocação ao seu usuário
+
+Antes de testar, sua conta precisa do papel **Invocador do Cloud Run (`roles/run.invoker`)** na função. Execute o comando abaixo no Cloud Shell, substituindo `SEU_EMAIL` pelo e-mail da sua conta educacional:
+
+```bash
+gcloud functions add-invoker-policy-binding boletim-node \
+  --region=us-central1 \
+  --member="user:SEU_EMAIL"
+```
+
+> Esse comando autoriza especificamente a sua conta a chamar a função. O membro usa o prefixo `user:`, que pertence ao domínio da instituição, portanto não esbarra na política Domain Restricted Sharing.
+
 ### Opção A: Teste Rápido via Terminal (cURL)
 
-No próprio Cloud Shell (ou no terminal do seu computador), você pode testar disparando o comando abaixo. Substitua a URL pela gerada no seu deploy:
+No próprio Cloud Shell, execute o comando abaixo. Ele gera o token de identidade automaticamente com `gcloud auth print-identity-token` e o envia no cabeçalho. Substitua a URL pela gerada no seu deploy:
 
 ```bash
 curl -X POST https://SUA_URL_GERADA_AQUI \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
   -H "Content-Type: application/json" \
   -d '{"ra": "12345", "materia_id": "BDR", "t1": 8, "t2": 7, "p1": 6.5, "p2": 8}'
 ```
 
-Se tudo der certo, você receberá um JSON no terminal contendo o link de download do PDF.
+Se tudo der certo, você receberá um JSON no terminal contendo o `link_download` do PDF. Esse link pode ser aberto diretamente no navegador, sem necessidade de login.
+
+> **Dica:** se quiser inspecionar o token ou reutilizá-lo, gere-o separadamente e guarde em uma variável:
+>
+> ```bash
+> TOKEN=$(gcloud auth print-identity-token)
+> echo $TOKEN
+> ```
+>
+> Depois é só usar `-H "Authorization: Bearer $TOKEN"` nas requisições.
 
 ### Opção B: Teste Visual Profissional via Bruno (Windows)
 
 O Bruno é um cliente de API open-source e muito leve, excelente alternativa ao Postman para testes estruturados.
 
-1. Abra o Bruno no seu Windows.
-2. Clique em **Create Collection** (Criar Coleção) e dê o nome de `Laboratorio Nuvem`.
-3. Dentro da coleção, clique em **New Request** (Nova Requisição):
+1. Primeiro, gere o token de identidade. No Cloud Shell, execute:
+
+   ```bash
+   gcloud auth print-identity-token
+   ```
+
+   Copie o texto longo retornado (é o token). Ele será colado no Bruno no passo 7.
+2. Abra o Bruno no seu Windows.
+3. Clique em **Create Collection** (Criar Coleção) e dê o nome de `Laboratorio Nuvem`.
+4. Dentro da coleção, clique em **New Request** (Nova Requisição):
    * **Name:** Gerar Boletim Node
    * **Type:** HTTP
    * **Method:** mude de `GET` para `POST`.
    * **URL:** cole a URL gerada no final do comando de deploy.
-4. Abaixo da barra de URL, clique na aba **Body**.
-5. Selecione a opção **JSON**.
-6. Cole o seguinte payload (dados de teste) na caixa de texto:
+5. Abaixo da barra de URL, clique na aba **Auth**.
+6. No tipo de autenticação, selecione **Bearer Token**.
+7. No campo **Token**, cole o token de identidade copiado no passo 1.
+8. Clique na aba **Body**, selecione a opção **JSON** e cole o seguinte payload (dados de teste):
 
    ```json
    {
@@ -318,9 +398,11 @@ O Bruno é um cliente de API open-source e muito leve, excelente alternativa ao 
    }
    ```
 
-7. Clique no botão **Send** (Enviar) no canto superior direito.
-8. Observe o painel de **Response** (Resposta) no lado direito da tela. Você verá o status `200 OK` e o JSON com a mensagem de sucesso.
-9. Clique no link gerado na resposta para fazer o download do PDF criado diretamente no navegador.
+9. Clique no botão **Send** (Enviar) no canto superior direito.
+10. Observe o painel de **Response** (Resposta) no lado direito da tela. Você verá o status `200 OK` e o JSON com a mensagem de sucesso.
+11. Clique no link gerado na resposta (`link_download`) para baixar o PDF diretamente no navegador. Esse link é uma URL assinada, válida por 7 dias, e não exige login em conta Google.
+
+> **Se o teste retornar `401 Unauthorized` ou `403 Forbidden`:** o token pode ter expirado (validade de cerca de 1 hora). Gere um novo token com `gcloud auth print-identity-token` e atualize o campo no Bruno. Confirme também que o papel `roles/run.invoker` foi concedido à sua conta.
 
 ---
 
@@ -332,7 +414,8 @@ Para fixar os conceitos, realize as seguintes tarefas:
 2. **Tratamento de erro:** envie uma requisição com um `materia_id` inexistente (ex.: `XYZ`) e verifique a resposta retornada pela função.
 3. **Validação de entrada:** envie uma requisição omitindo a nota `p2` e analise o comportamento da função após a inclusão da validação.
 4. **Evolução do código:** acrescente um novo aluno e uma nova matéria aos arrays `alunosDB` e `materiasDB`, faça um novo deploy e gere o boletim correspondente.
-5. **Reflexão escrita:** descreva, em um parágrafo, uma situação real na qual a arquitetura serverless traria vantagem de custo frente a um servidor sempre ligado.
+5. **Análise do link assinado:** gere um boletim e examine a URL retornada no campo `link_download`. Identifique os parâmetros de assinatura presentes na URL (como `X-Goog-Expires` e `X-Goog-Signature`) e explique, com suas palavras, como esse mecanismo permite acesso ao arquivo sem login Google e por que ele é mais seguro que um bucket público. Considere que o link expira em 7 dias.
+6. **Reflexão escrita:** descreva, em um parágrafo, uma situação real na qual a arquitetura serverless traria vantagem de custo frente a um servidor sempre ligado.
 
 ---
 
