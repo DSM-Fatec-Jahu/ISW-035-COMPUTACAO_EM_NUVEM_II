@@ -17,14 +17,43 @@ Neste laboratório, desenvolveremos uma Cloud Function responsável por receber 
 Para realizar este laboratório, você precisará de:
 
 * Conta no **Google Cloud Platform (GCP)** com um projeto ativo.
-* APIs habilitadas no projeto: `Cloud Functions API`, `Cloud Build API`, `Cloud Run API` e `Cloud Storage API`.
+* APIs habilitadas no projeto: `Cloud Functions API`, `Cloud Build API`, `Cloud Run API` e `Cloud Storage API` (a habilitação está detalhada no item 3).
 * Ambiente de execução: utilizaremos o **Google Cloud Shell** (terminal nativo na nuvem do Google).
 * Cliente de API: **Bruno** instalado no seu computador com Windows, para realização de testes visuais.
-* Um **bucket** previamente criado no Cloud Storage (a criação está detalhada no item 3).
+* Um **bucket** previamente criado no Cloud Storage (a criação está detalhada no item 4).
 
 ---
 
-## 3. Criação do Bucket no Cloud Storage
+## 3. Habilitação das APIs Necessárias
+
+Antes de criar qualquer recurso, é preciso habilitar no projeto as APIs dos serviços que serão utilizados. Sem essa etapa, os comandos de criação do bucket e de deploy da função falham.
+
+No terminal do Cloud Shell, execute o comando abaixo, que habilita todas as APIs necessárias de uma só vez:
+
+```bash
+gcloud services enable \
+  cloudfunctions.googleapis.com \
+  cloudbuild.googleapis.com \
+  run.googleapis.com \
+  storage.googleapis.com \
+  artifactregistry.googleapis.com \
+  logging.googleapis.com
+```
+
+> **Entendendo cada API:**
+>
+> * `cloudfunctions.googleapis.com` (**Cloud Functions API**): permite criar e gerenciar as funções serverless.
+> * `cloudbuild.googleapis.com` (**Cloud Build API**): responsável por empacotar o código e construir a imagem da função durante o deploy.
+> * `run.googleapis.com` (**Cloud Run API**): necessária porque as funções de 2ª geração (`--gen2`) rodam sobre a infraestrutura do Cloud Run.
+> * `storage.googleapis.com` (**Cloud Storage API**): permite criar buckets e armazenar os arquivos PDF.
+> * `artifactregistry.googleapis.com` (**Artifact Registry API**): armazena a imagem de contêiner gerada no build da função de 2ª geração.
+> * `logging.googleapis.com` (**Cloud Logging API**): registra os logs de execução da função, úteis para depurar erros.
+
+> **Observação:** a habilitação das APIs pode levar alguns instantes para se propagar. Ao executar o primeiro deploy, o `gcloud` ainda pode perguntar se deseja habilitar alguma API pendente; basta confirmar com `Y`. Habilitar tudo explicitamente desde o início, como neste passo, evita falhas no meio do laboratório.
+
+---
+
+## 4. Criação do Bucket no Cloud Storage
 
 Antes de programar a função, precisamos do "depósito" onde os PDFs serão armazenados. Você pode criar o bucket de duas formas: pelo painel gráfico (Opção A) ou diretamente pelo terminal (Opção B). Escolha a que preferir.
 
@@ -89,7 +118,7 @@ No terminal do Cloud Shell, execute os comandos abaixo. Lembre-se de trocar `bol
 
 ---
 
-## 4. Criação do Projeto e Código no Cloud Shell
+## 5. Criação do Projeto e Código no Cloud Shell
 
 Para não precisarmos instalar nada localmente, desenvolveremos diretamente na nuvem.
 
@@ -213,11 +242,11 @@ functions.http('gerarBoletim', (req, res) => {
 });
 ```
 
-> **Nota sobre a URL pública:** o link no formato `https://storage.googleapis.com/bucket/arquivo` só funciona porque liberamos o bucket para leitura pública no item 3. Caso prefira tornar público apenas o objeto gerado (em vez do bucket inteiro), você pode adicionar `predefinedAcl: 'publicRead'` nas opções do `createWriteStream`, desde que o bucket esteja com o Acesso uniforme em nível de bucket desativado.
+> **Nota sobre a URL pública:** o link no formato `https://storage.googleapis.com/bucket/arquivo` só funciona porque liberamos o bucket para leitura pública no item 4. Caso prefira tornar público apenas o objeto gerado (em vez do bucket inteiro), você pode adicionar `predefinedAcl: 'publicRead'` nas opções do `createWriteStream`, desde que o bucket esteja com o Acesso uniforme em nível de bucket desativado.
 
 ---
 
-## 5. Implementação (Deploy - Gen 2)
+## 6. Implementação (Deploy - Gen 2)
 
 Volte para o terminal do Cloud Shell (certifique-se de estar dentro da pasta `lab-boletim-node`). Execute o comando abaixo para implantar seu código na infraestrutura do Google:
 
@@ -249,7 +278,7 @@ Após cerca de 2 minutos, o terminal exibirá o status `OK` e fornecerá a URL p
 
 ---
 
-## 6. Testando a Função Implementada
+## 7. Testando a Função Implementada
 
 ### Opção A: Teste Rápido via Terminal (cURL)
 
@@ -295,7 +324,7 @@ O Bruno é um cliente de API open-source e muito leve, excelente alternativa ao 
 
 ---
 
-## 7. Atividade Proposta
+## 8. Atividade Proposta
 
 Para fixar os conceitos, realize as seguintes tarefas:
 
@@ -307,7 +336,7 @@ Para fixar os conceitos, realize as seguintes tarefas:
 
 ---
 
-## 8. Encerramento e Limpeza de Recursos
+## 9. Encerramento e Limpeza de Recursos
 
 Para evitar cobranças indevidas após o laboratório, lembre-se de remover os recursos criados:
 
